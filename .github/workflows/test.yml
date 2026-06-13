@@ -37,11 +37,12 @@ jobs:
 
       - name: Install PowerShell 7
         run: |
-          brew install --cask powershell-preview
-          # fallback if preview is missing
+          set +e
+          brew install --cask powershell@preview 2>/dev/null
           if ! command -v pwsh >/dev/null 2>&1; then
-            brew install --cask powershell
+            brew install --cask powershell 2>/dev/null
           fi
+          set -e
           if ! command -v pwsh >/dev/null 2>&1; then
             echo "::error::pwsh not found after install"
             exit 1
