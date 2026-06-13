@@ -10,34 +10,47 @@ param(
 )
 
 # ---- Цвета ----------------------------------------------------------------
-# Принудительно включаем поддержку виртуального терминала (ANSI) на Windows,
-# даже если $Host.UI.SupportsVirtualTerminal = $false (классический powershell.exe под cmd.exe).
-if ($IsWindows -or ($env:OS -eq 'Windows_NT')) {
-    try {
-        $signature = @"
+# Пытаемся включить поддержку виртуального терминала (ANSI) на Windows.
+# Если SetConsoleMode не сработал (классический cmd.exe / conhost v1 без UTF-8),
+# переключаемся на $Host.UI.RawUI с 16-цветной палитрой — она работает ВСЕГДА.
+$UseVT = $false
+$UseHostColor = $false
+if (-not $NoColor -and -not [Console]::IsOutputRedirected) {
+    if ($IsWindows -or ($env:OS -eq 'Windows_NT')) {
+        try {
+            $signature = @"
 [DllImport("kernel32.dll", SetLastError=true)]
 public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
-
 [DllImport("kernel32.dll", SetLastError=true)]
 public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
-
 [DllImport("kernel32.dll", SetLastError=true)]
 public static extern IntPtr GetStdHandle(int nStdHandle);
 "@
-        $type = Add-Type -MemberDefinition $signature -Name 'KebiConsole' -Namespace 'Kebi' -PassThru -ErrorAction SilentlyContinue
-        $handle = [Kebi.KebiConsole]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
-        $mode = 0
-        if ([Kebi.KebiConsole]::GetConsoleMode($handle, [ref]$mode)) {
-            $ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
-            if (($mode -band $ENABLE_VIRTUAL_TERMINAL_PROCESSING) -eq 0) {
-                [Kebi.KebiConsole]::SetConsoleMode($handle, $mode -bor $ENABLE_VIRTUAL_TERMINAL_PROCESSING) | Out-Null
+            if (-not ('Kebi.KebiConsole' -as [type])) {
+                Add-Type -MemberDefinition $signature -Name 'KebiConsole' -Namespace 'Kebi'
             }
-        }
-        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    } catch {}
+            $handle = [Kebi.KebiConsole]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
+            $mode = 0
+            if ([Kebi.KebiConsole]::GetConsoleMode($handle, [ref]$mode)) {
+                $ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+                [void][Kebi.KebiConsole]::SetConsoleMode($handle, $mode -bor $ENABLE_VIRTUAL_TERMINAL_PROCESSING)
+                $mode2 = 0
+                [void][Kebi.KebiConsole]::GetConsoleMode($handle, [ref]$mode2)
+                if (($mode2 -band $ENABLE_VIRTUAL_TERMINAL_PROCESSING) -ne 0) {
+                    $UseVT = $true
+                }
+            }
+            [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+        } catch {}
+    } else {
+        $UseVT = $true
+    }
+    # Fallback: $Host.UI.RawUI умеет 16 цветов на любом терминале Windows
+    if (-not $UseVT -and ($IsWindows -or ($env:OS -eq 'Windows_NT'))) {
+        $UseHostColor = $Host -and $Host.UI -and $Host.UI.RawUI
+    }
 }
-
-$UseColor = -not $NoColor -and -not [Console]::IsOutputRedirected -and ($Host.UI.SupportsVirtualTerminal -or $IsWindows -or ($env:OS -eq 'Windows_NT'))
+$UseColor = $UseVT -or $UseHostColor
 if ($UseColor) {
     $C = @{
         Reset   = "`e[0m"
@@ -47,15 +60,47 @@ if ($UseColor) {
         BCyan   = "`e[1;36m"
         BGreen  = "`e[1;32m"
     }
+    # Имена цветов для $Host.UI.RawUI.ForegroundColor (работает без VT)
+    $HC = @{
+        Reset   = ''
+        Dim     = 'Gray'
+        White   = 'White'
+        Cyan    = 'Cyan'
+        BCyan   = 'Cyan'
+        BGreen  = 'Green'
+    }
     $LogoColors = @("`e[1;32m", "`e[1;36m", "`e[1;34m", "`e[1;35m")
+    $LogoHostColors = @('Green', 'Cyan', 'Blue', 'Magenta')
 } else {
     $C = @{} ; foreach ($k in 'Reset','Dim','White','Cyan','BCyan','BGreen') { $C[$k] = '' }
+    $HC = @{} ; foreach ($k in 'Reset','Dim','White','Cyan','BCyan','BGreen') { $HC[$k] = $null }
     $LogoColors = @('','','','')
+    $LogoHostColors = @($null, $null, $null, $null)
 }
 
-function Paint($text, $color) {
-    if ($UseColor -and $color) { return "$color$text$($C.Reset)" }
-    return $text
+# Возвращает [pscustomobject]@{ Text; Color } где Color — ANSI-строка или $null
+function Paint($text, $key) {
+    if (-not $UseColor) { return [pscustomobject]@{ Text = $text; Ansi = $null; HostName = $null } }
+    if ($UseVT) {
+        $ansi = $C[$key]
+        $out = if ($ansi) { "$ansi$text$($C.Reset)" } else { $text }
+        return [pscustomobject]@{ Text = $out; Ansi = $ansi; HostName = $null }
+    } else {
+        $name = $HC[$key]
+        return [pscustomobject]@{ Text = $text; Ansi = $null; HostName = $name }
+    }
+}
+
+# Возвращает окрашенный символ для лого (по индексу столбца)
+function PaintLogoChar($ch, $colIdx) {
+    if (-not $UseColor) { return $ch }
+    if ($UseVT) {
+        $c = $LogoColors[$colIdx]
+        return if ($c) { "$c$ch$($C.Reset)" } else { $ch }
+    } else {
+        # для host-color символы пишем по одному — соберём массивом
+        return $ch  # обработаем отдельно
+    }
 }
 
 # ---- ASCII-логотип KEBI ---------------------------------------------------
@@ -68,20 +113,30 @@ $Logo = @(
 )
 
 function Get-PaintedLogo {
-    $lines = @()
+    # Возвращает массив строк, каждая строка — массив @{ Ch; Ansi; HostName }
+    $rows = @()
     for ($i = 0; $i -lt $Logo.Count; $i++) {
         $row = $Logo[$i]
-        $painted = ''
+        $cells = @()
         for ($j = 0; $j -lt $row.Length; $j++) {
             $ratio = if ($row.Length -gt 0) { $j / [double]$row.Length } else { 0 }
             $idx = [int][Math]::Floor($ratio * $LogoColors.Count)
             if ($idx -ge $LogoColors.Count) { $idx = $LogoColors.Count - 1 }
             if ($idx -lt 0) { $idx = 0 }
-            $painted += Paint $row[$j] $LogoColors[$idx]
+            $ch = $row[$j]
+            if (-not $UseColor) {
+                $cells += [pscustomobject]@{ Ch = $ch; Ansi = $null; HostName = $null }
+            } elseif ($UseVT) {
+                $ansi = $LogoColors[$idx]
+                $cells += [pscustomobject]@{ Ch = $ch; Ansi = $ansi; HostName = $null }
+            } else {
+                $name = $LogoHostColors[$idx]
+                $cells += [pscustomobject]@{ Ch = $ch; Ansi = $null; HostName = $name }
+            }
         }
-        $lines += $painted
+        $rows += ,$cells
     }
-    return ,$lines
+    return ,$rows
 }
 
 # ---- Кроссплатформенные хелперы -----------------------------------------
@@ -339,6 +394,56 @@ function Get-Info {
 }
 
 # ---- Рендер ---------------------------------------------------------------
+# Утилита: пишет строку с покраской через ANSI или Host.ForegroundColor
+function Write-ColorLine {
+    param(
+        [string]$Text,
+        [string]$AnsiColor = $null,
+        [string]$HostName = $null
+    )
+    if ($UseVT -and $AnsiColor) {
+        Write-Host "$AnsiColor$Text$($C.Reset)"
+    } elseif ($UseHostColor -and $HostName) {
+        Write-Host $Text -ForegroundColor $HostName
+    } else {
+        Write-Host $Text
+    }
+}
+
+# Пишет строку логотипа (массив ячеек)
+function Write-LogoLine {
+    param([object[]]$Cells)
+    if (-not $Cells) { Write-Host ''; return }
+    if ($UseVT) {
+        $sb = ''
+        foreach ($cell in $Cells) {
+            $sb += if ($cell.Ansi) { "$($cell.Ansi)$($cell.Ch)$($C.Reset)" } else { $cell.Ch }
+        }
+        Write-Host $sb
+    } elseif ($UseHostColor) {
+        $curColor = $null
+        $buf = ''
+        foreach ($cell in $Cells) {
+            $name = $cell.HostName
+            if ($name -ne $curColor) {
+                if ($buf.Length -gt 0 -and $curColor) { Write-Host $buf -ForegroundColor $curColor -NoNewline }
+                $curColor = $name
+                $buf = $cell.Ch
+            } else {
+                $buf += $cell.Ch
+            }
+        }
+        if ($buf.Length -gt 0) {
+            if ($curColor) { Write-Host $buf -ForegroundColor $curColor -NoNewline } else { Write-Host $buf -NoNewline }
+        }
+        Write-Host ''
+    } else {
+        $s = ''
+        foreach ($cell in $Cells) { $s += $cell.Ch }
+        Write-Host $s
+    }
+}
+
 $info = Get-Info
 
 if ($Fields) {
@@ -358,29 +463,56 @@ if (-not $hostName) { try { $hostName = hostname } catch { $hostName = [System.N
 $title = "$user@$hostName"
 $underline = '-' * $title.Length
 
-$rightCol = @()
-$rightCol += Paint $title $C.BCyan
-$rightCol += Paint $underline $C.Cyan
-$rightCol += ''
+# Формируем массив "правых" строк: каждая — массив сегментов @{ Text; Ansi; HostName }
+$rightSegs = @()
+$rightSegs += ,(Paint $title 'BCyan')
+$rightSegs += ,(Paint $underline 'Cyan')
+$rightSegs += ,([pscustomobject]@{ Text = ''; Ansi = $null; HostName = $null })
 foreach ($k in $info.Keys) {
-    $label = Paint "$k" $C.BGreen
-    $sep   = Paint ':' $C.Dim
-    $val   = Paint ([string]$info[$k]) $C.White
-    $rightCol += "$label$sep $val"
+    $line = @()
+    $line += Paint "$k" 'BGreen'
+    $line += Paint ':' 'Dim'
+    $line += Paint " $([string]$info[$k])" 'White'
+    $rightSegs += ,$line
 }
 
-$maxLines = [Math]::Max($logoLines.Count, $rightCol.Count)
+function Write-RightLine([object[]]$Segs) {
+    if (-not $Segs -or $Segs.Count -eq 0) { Write-Host ''; return }
+    if ($UseVT) {
+        $sb = ''
+        foreach ($s in $Segs) { $sb += if ($s.Ansi) { "$($s.Ansi)$($s.Text)$($C.Reset)" } else { $s.Text } }
+        Write-Host $sb -NoNewline
+    } elseif ($UseHostColor) {
+        foreach ($s in $Segs) {
+            if ($s.HostName) { Write-Host $s.Text -ForegroundColor $s.HostName -NoNewline }
+            elseif ($s.Text) { Write-Host $s.Text -NoNewline }
+        }
+    } else {
+        $sb = ''
+        foreach ($s in $Segs) { $sb += $s.Text }
+        Write-Host $sb -NoNewline
+    }
+}
+
+$maxLines = [Math]::Max($logoLines.Count, $rightSegs.Count)
 
 for ($i = 0; $i -lt $maxLines; $i++) {
-    $left  = if ($i -lt $logoLines.Count) { $logoLines[$i] } else { '' }
-    $right = if ($i -lt $rightCol.Count) { $rightCol[$i] } else { '' }
-    if ($left -and $right) {
+    $hasLeft  = ($i -lt $logoLines.Count) -and $logoLines[$i] -and $logoLines[$i].Count -gt 0
+    $hasRight = ($i -lt $rightSegs.Count) -and $rightSegs[$i] -and $rightSegs[$i].Count -gt 0
+
+    if ($hasLeft -and $hasRight) {
+        Write-LogoLine $logoLines[$i]
         $pad = ' ' * [Math]::Max($Padding, $logoWidth - $Logo[$i].Length + $Padding)
-        Write-Host "$left$pad$right"
-    } elseif ($left) {
-        Write-Host $left
+        Write-Host $pad -NoNewline
+        Write-RightLine $rightSegs[$i]
+        Write-Host ''
+    } elseif ($hasLeft) {
+        Write-LogoLine $logoLines[$i]
+    } elseif ($hasRight) {
+        Write-RightLine $rightSegs[$i]
+        Write-Host ''
     } else {
-        Write-Host $right
+        Write-Host ''
     }
 }
 
@@ -388,7 +520,15 @@ for ($i = 0; $i -lt $maxLines; $i++) {
 if ($UseColor) {
     Write-Host ''
     $bg = @(40,41,42,43,44,45,46,47,100,101,102,103,104,105,106,107)
-    $line = ''
-    foreach ($c in $bg) { $line += "`e[${c}m  $($C.Reset)" }
-    Write-Host $line
+    if ($UseVT) {
+        $line = ''
+        foreach ($c in $bg) { $line += "`e[${c}m  $($C.Reset)" }
+        Write-Host $line
+    } else {
+        # 16 host-цветов: Black, DarkRed, DarkGreen, DarkYellow, DarkBlue, DarkMagenta, DarkCyan, Gray,
+        # DarkGray, Red, Green, Yellow, Blue, Magenta, Cyan, White
+        $names = @('Black','DarkRed','DarkGreen','DarkYellow','DarkBlue','DarkMagenta','DarkCyan','Gray','DarkGray','Red','Green','Yellow','Blue','Magenta','Cyan','White')
+        foreach ($n in $names) { Write-Host '  ' -ForegroundColor $n -NoNewline }
+        Write-Host ''
+    }
 }
