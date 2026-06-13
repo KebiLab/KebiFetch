@@ -1,0 +1,52 @@
+name: Test KebiFetch
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PowerShell
+        shell: pwsh
+        run: |
+          if ($IsLinux -ne $true) {
+            throw "This must be Linux"
+          }
+
+      - name: Install PowerShell 7
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https software-properties-common
+          wget -q https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb
+          sudo dpkg -i packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo apt-get install -y powershell
+
+      - name: Run kebifetch
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File ./kebifetch.ps1 -NoColor
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PowerShell
+        run: brew install --cask powershell
+
+      - name: Run kebifetch
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./kebifetch.ps1 -NoColor
