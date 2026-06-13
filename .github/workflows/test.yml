@@ -15,13 +15,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install PowerShell
-        shell: pwsh
-        run: |
-          if ($IsLinux -ne $true) {
-            throw "This must be Linux"
-          }
-
       - name: Install PowerShell 7
         run: |
           sudo apt-get update
@@ -32,7 +25,6 @@ jobs:
           sudo apt-get install -y powershell
 
       - name: Run kebifetch
-        shell: pwsh
         run: |
           pwsh -NoProfile -ExecutionPolicy Bypass -File ./kebifetch.ps1 -NoColor
 
@@ -43,10 +35,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install PowerShell
-        run: brew install --cask powershell
+      - name: Install PowerShell 7
+        run: |
+          brew install --cask powershell-preview
+          # fallback if preview is missing
+          if ! command -v pwsh >/dev/null 2>&1; then
+            brew install --cask powershell
+          fi
+          if ! command -v pwsh >/dev/null 2>&1; then
+            echo "::error::pwsh not found after install"
+            exit 1
+          fi
 
       - name: Run kebifetch
-        shell: pwsh
         run: |
           pwsh -NoProfile -File ./kebifetch.ps1 -NoColor
