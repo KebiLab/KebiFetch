@@ -10,7 +10,34 @@ param(
 )
 
 # ---- Цвета ----------------------------------------------------------------
-$UseColor = -not $NoColor -and -not [Console]::IsOutputRedirected -and $Host.UI.SupportsVirtualTerminal
+# Принудительно включаем поддержку виртуального терминала (ANSI) на Windows,
+# даже если $Host.UI.SupportsVirtualTerminal = $false (классический powershell.exe под cmd.exe).
+if ($IsWindows -or ($env:OS -eq 'Windows_NT')) {
+    try {
+        $signature = @"
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool GetConsoleMode(IntPtr hConsoleHandle, out uint lpMode);
+
+[DllImport("kernel32.dll", SetLastError=true)]
+public static extern IntPtr GetStdHandle(int nStdHandle);
+"@
+        $type = Add-Type -MemberDefinition $signature -Name 'KebiConsole' -Namespace 'Kebi' -PassThru -ErrorAction SilentlyContinue
+        $handle = [Kebi.KebiConsole]::GetStdHandle(-11) # STD_OUTPUT_HANDLE
+        $mode = 0
+        if ([Kebi.KebiConsole]::GetConsoleMode($handle, [ref]$mode)) {
+            $ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+            if (($mode -band $ENABLE_VIRTUAL_TERMINAL_PROCESSING) -eq 0) {
+                [Kebi.KebiConsole]::SetConsoleMode($handle, $mode -bor $ENABLE_VIRTUAL_TERMINAL_PROCESSING) | Out-Null
+            }
+        }
+        [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    } catch {}
+}
+
+$UseColor = -not $NoColor -and -not [Console]::IsOutputRedirected -and ($Host.UI.SupportsVirtualTerminal -or $IsWindows -or ($env:OS -eq 'Windows_NT'))
 if ($UseColor) {
     $C = @{
         Reset   = "`e[0m"
