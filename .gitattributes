@@ -2,3 +2,4 @@
 *.py linguist-vendored
 *.ps1 linguist-vendored
 *.psm1 linguist-vendored
+*.cmd linguist-vendored
